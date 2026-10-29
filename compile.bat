@@ -1,0 +1,1 @@
+x86_64-w64-mingw32-gcc.exe winstruct.c -O2 -s -static -o winstruct.exe 

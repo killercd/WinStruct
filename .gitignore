@@ -1,0 +1,13 @@
+# Compiled executables and libraries
+*.exe
+*.dll
+*.a
+*.lib
+
+# Compiler and linker intermediate files
+*.o
+*.obj
+*.exp
+*.pdb
+*.ilk
+

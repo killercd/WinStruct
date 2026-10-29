@@ -16,31 +16,34 @@ The initial Windows x64 implementation can:
 - Follow pointers through selected process-internal structures and enumerate loaded modules.
 - Display field offsets, addresses, and values in aligned console tables.
 - Highlight important addresses for easier pointer tracing.
-- Optionally show hexadecimal memory previews, field descriptions, and C pointer-arithmetic examples.
+- Optionally show hexadecimal memory previews, 30-byte ASCII previews, field descriptions, and C pointer-arithmetic examples.
 - Attempt limited, built-in x86-64 instruction decoding for executable memory regions, without external disassembly libraries.
+- Resolve a named DLL export by walking and displaying each in-memory PE structure involved.
 
-The optional table columns are designed to keep related information grouped, even when a cell spans multiple lines.
+The optional table columns are disabled unless their corresponding flag is supplied. They are designed to keep related information grouped, even when a cell spans multiple lines.
 
 ## Build
 
 **Requirements:** Windows x64 and a MinGW-w64 x86-64 GCC toolchain.
 
 ```bash
-x86_64-w64-mingw32-gcc.exe winstruct.c -o winstruct.exe -static
+x86_64-w64-mingw32-gcc.exe winstruct.c -O2 -s -static -o winstruct.exe
 ```
 
 ## Usage
 
 ```bash
-winstruct.exe [--hex] [--asm] [--desc] [--code] [--help]
+winstruct.exe [--func DLL:Function] [--hex] [--text] [--asm] [--desc] [--code] [--help]
 ```
 
 | Option | Purpose |
 | --- | --- |
-| `--hex` | Show up to 32 bytes at pointer destinations. |
+| `--func DLL:Function` | Find an already loaded module through the PEB, resolve an exact named export, and display every PE structure and lookup-array element used. |
+| `--hex` | Add a column containing up to 32 bytes from each pointer destination. |
+| `--text` | Add a column containing up to 30 bytes from each pointer destination as ASCII, replacing every byte outside `0x20`–`0x7E` with `.`. |
 | `--asm` | Attempt to decode up to 10 instructions from up to 64 bytes of executable memory. |
 | `--desc` | Add concise explanations of fields to the table. |
-| `--code` | Add C snippets using explicit Windows x64 offsets and pointer arithmetic. |
+| `--code` | Add C snippets using only explicit Windows x64 offsets, fixed array strides, and pointer arithmetic; the displayed code does not depend on SDK structure definitions. |
 | `--help` | Show the available options. |
 
 Options can be combined:
@@ -48,16 +51,59 @@ Options can be combined:
 ```bash
 winstruct.exe --desc --code
 winstruct.exe --hex --desc
+winstruct.exe --text --desc
 winstruct.exe --hex --asm --desc --code
+winstruct.exe --func KERNEL32.dll:LoadLibraryA
+winstruct.exe --func ntdll.dll:NtCreateFile --code
 ```
 
 Running without options displays a more compact view.
+
+`--desc`, `--code`, `--hex`, and `--text` are independent, opt-in columns. In particular, `--func` does not enable `--desc` automatically:
+
+```bash
+# PE tables without descriptions
+winstruct.exe --func KERNEL32.dll:LoadLibraryA
+
+# The same lookup with field descriptions and hardcoded-offset C snippets
+winstruct.exe --func KERNEL32.dll:LoadLibraryA --desc --code
+```
+
+## Named export lookup
+
+`--func` accepts a module basename and an exact export name separated by a colon:
+
+```text
+--func DLL:Function
+```
+
+The module must already be loaded in the current process. WinStruct locates it through the PEB loader list and does not load missing DLLs. DLL basename matching is case-insensitive, while export-name matching is exact and case-sensitive.
+
+The resolver does not call `GetProcAddress`. It walks and displays the same in-memory data used by a manual named-export lookup:
+
+1. `TEB` and `PEB` locate `PEB_LDR_DATA`.
+2. `LDR_DATA_TABLE_ENTRY` supplies the mapped DLL base.
+3. `IMAGE_DOS_HEADER.e_lfanew` locates `IMAGE_NT_HEADERS64`.
+4. The export `IMAGE_DATA_DIRECTORY` locates `IMAGE_EXPORT_DIRECTORY`.
+5. `AddressOfNames` is searched for the requested ASCII name.
+6. `AddressOfNameOrdinals` selects an index in `AddressOfFunctions`.
+7. The selected function RVA is added to the mapped DLL base to produce its VA.
+
+All RVAs and array spans are checked against `SizeOfImage` before they are dereferenced. If the selected function RVA falls inside the export-directory range, it represents a forwarder string rather than callable code. WinStruct prints the forwarder target and reports that distinction.
+
+## Optional data columns
+
+- `--hex` reads at most 32 bytes at pointer destinations and formats them as hexadecimal.
+- `--text` reads at most 30 bytes at pointer destinations. Printable ASCII is preserved and all other byte values appear as `.`.
+- `--desc` adds the field-description column only when explicitly requested.
+- `--code` adds reproducible C expressions based on fixed Windows x64 offsets. These snippets use integer types, pointer arithmetic, hardcoded field offsets, and explicit array strides such as `i * 4` or `i * 2`; they do not use Windows SDK structure definitions.
+- `--asm` only attempts decoding when the destination belongs to an executable memory page.
 
 ## Project direction
 
 WinStruct is intended to grow beyond its first process-memory walkthrough. Potential areas include:
 
-- Portable Executable (PE) layout and metadata.
+- Additional PE directories such as imports, relocations, TLS, and exception metadata.
 - Process and thread memory organization.
 - Memory regions, protections, and mappings.
 - Stacks, heaps, and other runtime data structures.
