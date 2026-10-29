@@ -43,7 +43,7 @@ typedef FARPROC (WINAPI *f_GetProcAddress)(HMODULE,LPCSTR);
 #define UNICODE_MAXLEN   0x02
 #define UNICODE_BUFFER   0x08
 
-static int opt_hex, opt_asm, opt_desc, opt_code, opt_text;
+static int opt_hex, opt_asm, opt_desc, opt_code, opt_code_full, opt_text;
 static HANDLE con;
 static WORD normal_attr = 7;
 
@@ -54,14 +54,86 @@ static void yellow(void) {
 static void normal(void) {
     if (con != INVALID_HANDLE_VALUE) SetConsoleTextAttribute(con, normal_attr);
 }
+static void code_color(WORD foreground) {
+    if (con != INVALID_HANDLE_VALUE)
+        SetConsoleTextAttribute(con,(normal_attr & 0xfff0) | foreground);
+}
+static int c_keyword(const char *s, size_t n) {
+    static const char *words[]={
+        "break","case","char","const","continue","default","do","else","enum",
+        "extern","for","if","int","long","return","short","signed","sizeof",
+        "static","struct","switch","typedef","union","unsigned","void","volatile",
+        "while","size_t","uint16_t","uint32_t","uint64_t","uintptr_t"
+    };
+    for (size_t i=0;i<sizeof(words)/sizeof(words[0]);i++)
+        if (strlen(words[i])==n && !memcmp(s,words[i],n)) return 1;
+    return 0;
+}
+static void code_span(const char *s, size_t n, WORD color) {
+    code_color(color);
+    fwrite(s,1,n,stdout);
+    normal();
+}
+static void print_c_highlight(const char *s) {
+    const WORD cyan=FOREGROUND_GREEN|FOREGROUND_BLUE|FOREGROUND_INTENSITY;
+    const WORD green=FOREGROUND_GREEN|FOREGROUND_INTENSITY;
+    const WORD magenta=FOREGROUND_RED|FOREGROUND_BLUE|FOREGROUND_INTENSITY;
+    const WORD comment=FOREGROUND_GREEN;
+    size_t i=0;
+    while (s && s[i]) {
+        if (s[i]=='/' && s[i+1]=='/') {
+            size_t j=i+2; while (s[j] && s[j]!='\n') j++;
+            code_span(s+i,j-i,comment); i=j; continue;
+        }
+        if (s[i]=='/' && s[i+1]=='*') {
+            size_t j=i+2;
+            while (s[j] && !(s[j]=='*' && s[j+1]=='/')) j++;
+            if (s[j]) j+=2;
+            code_span(s+i,j-i,comment); i=j; continue;
+        }
+        if (s[i]=='"' || s[i]=='\'') {
+            char quote=s[i]; size_t j=i+1;
+            while (s[j]) {
+                if (s[j]=='\\' && s[j+1]) { j+=2; continue; }
+                if (s[j++]==quote) break;
+            }
+            code_span(s+i,j-i,green); i=j; continue;
+        }
+        if (s[i]=='#' && (i==0 || s[i-1]=='\n')) {
+            size_t j=i+1; while (s[j] && s[j]!='\n') j++;
+            code_span(s+i,j-i,cyan); i=j; continue;
+        }
+        if ((s[i]>='0' && s[i]<='9')) {
+            size_t j=i+1;
+            while ((s[j]>='0' && s[j]<='9') || (s[j]>='a' && s[j]<='f') ||
+                   (s[j]>='A' && s[j]<='F') || s[j]=='x' || s[j]=='X' || s[j]=='u' || s[j]=='U') j++;
+            code_span(s+i,j-i,magenta); i=j; continue;
+        }
+        if ((s[i]>='A' && s[i]<='Z') || (s[i]>='a' && s[i]<='z') || s[i]=='_') {
+            size_t j=i+1;
+            while ((s[j]>='A' && s[j]<='Z') || (s[j]>='a' && s[j]<='z') ||
+                   (s[j]>='0' && s[j]<='9') || s[j]=='_') j++;
+            if (c_keyword(s+i,j-i)) code_span(s+i,j-i,cyan);
+            else fwrite(s+i,1,j-i,stdout);
+            i=j; continue;
+        }
+        putchar((unsigned char)s[i++]);
+    }
+    normal();
+}
+static void cputs(const char *s) {
+    print_c_highlight(s);
+    putchar('\n');
+}
 static void usage(const char *exe) {
-    printf("Usage: %s [--func DLL:Function] [--hex] [--text] [--asm] [--desc] [--code] [--help]\n", exe);
-    puts("  --func DLL:Function  Resolve a named export and explain every PE structure used");
+    printf("Usage: %s [--func DLL:Function] [--hex] [--text] [--asm] [--desc] [--code|--code-full] [--help]\n", exe);
+    puts("  --func DLL:Function  Resolve a named export and display every PE structure used");
     puts("  --hex   Show 32 bytes at each pointer destination");
     puts("  --text  Show 30 bytes as printable ASCII; non-printable bytes become '.'");
     puts("  --asm   Decode up to 10 instructions / 64 bytes at executable addresses");
     puts("  --desc  Explain fields");
     puts("  --code  Show standalone pointer-arithmetic C snippets (Windows x64 offsets)");
+    puts("  --code-full  Show full PEB-to-data C code below each section (exclusive with --code)");
     puts("Flags can be combined; no flags = compact table.");
 }
 
@@ -289,7 +361,11 @@ static void row(uintptr_t parent, size_t off, const char *name,
             printf(" %-8s | %-18s | %-29s | %-18s", "", "", "", "");
         }
         if (opt_desc) printf(" | %-*s", DESC_COL_WIDTH, dline);
-        if (opt_code) printf(" | %-*s", CODE_COL_WIDTH, cline);
+        if (opt_code) {
+            printf(" | ");
+            print_c_highlight(cline);
+            printf("%*s",CODE_COL_WIDTH-(int)strlen(cline),"");
+        }
         if (opt_hex) printf(" | %-*s", HEX_COL_WIDTH, hline);
         if (opt_text) printf(" | %-*s", TEXT_COL_WIDTH, first ? ascii : "");
         putchar('\n');
@@ -340,6 +416,231 @@ static void print_name(uintptr_t buffer, unsigned len) {
     yellow(); printf("%.*ls",(int)(len/sizeof(wchar_t)),str); normal(); putchar('\n');
 }
 
+enum full_code_section {
+    FULL_TEB, FULL_PEB, FULL_LDR, FULL_LDR_ENTRY, FULL_DOS,
+    FULL_NT, FULL_EXPORT_DATA, FULL_EXPORT_DIR, FULL_EXPORT_LOOKUP
+};
+
+static void full_code_begin(const char *path) {
+    if (!opt_code_full) return;
+    puts("\n  FULL C CODE (hardcoded Windows x64 offsets)");
+    printf("  PATH: %s\n",path);
+    puts("  --------------------------------------------------------------------------");
+    cputs("#include <stdint.h>");
+    cputs("#include <stddef.h>");
+    cputs("#include <string.h>");
+}
+
+static void full_code_request_comment(const char *module, const char *function) {
+    char line[1600];
+    if (!module) return;
+    if (function) snprintf(line,sizeof line,"/* Requested export: %s:%s */",module,function);
+    else snprintf(line,sizeof line,"/* Requested module: %s */",module);
+    cputs(line);
+}
+
+static void full_module_lookup(void) {
+    cputs(
+"\nstatic int same_module_name(uintptr_t entry, const char *wanted) {\n"
+"    uint16_t bytes = *(uint16_t *)(entry + 0x48);\n"
+"    uintptr_t buffer = *(uintptr_t *)(entry + 0x50);\n"
+"    size_t count = bytes / 2, start = 0, wanted_len = strlen(wanted);\n"
+"    uint16_t *name = (uint16_t *)buffer;\n"
+"    for (size_t i = 0; i < count; ++i)\n"
+"        if (name[i] == '\\\\' || name[i] == '/') start = i + 1;\n"
+"    if (count - start != wanted_len) return 0;\n"
+"    for (size_t i = 0; i < wanted_len; ++i) {\n"
+"        uint16_t a = name[start + i];\n"
+"        unsigned char b = (unsigned char)wanted[i];\n"
+"        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';\n"
+"        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';\n"
+"        if (a != b) return 0;\n"
+"    }\n"
+"    return 1;\n"
+"}\n"
+"\nstatic uintptr_t find_module_entry(uintptr_t peb, const char *wanted) {\n"
+"    uintptr_t ldr = *(uintptr_t *)(peb + 0x18);\n"
+"    uintptr_t head = ldr + 0x20;\n"
+"    uintptr_t curr = *(uintptr_t *)(head + 0x00);\n"
+"    for (unsigned n = 0; curr && curr != head && n < 1024; ++n) {\n"
+"        uintptr_t entry = curr - 0x10;\n"
+"        if (same_module_name(entry, wanted)) return entry;\n"
+"        curr = *(uintptr_t *)(curr + 0x00);\n"
+"    }\n"
+"    return 0;\n"
+"}\n"
+"\nstatic uintptr_t find_module_base(uintptr_t peb, const char *wanted) {\n"
+"    uintptr_t entry = find_module_entry(peb, wanted);\n"
+"    return entry ? *(uintptr_t *)(entry + 0x30) : 0;\n"
+"}");
+}
+
+static void print_full_code(enum full_code_section section,
+                            const char *module_name, const char *function_name) {
+    if (!opt_code_full) return;
+    switch (section) {
+        case FULL_TEB:
+            full_code_begin("CPU GS -> TEB -> PEB pointer");
+            cputs(
+"\nstatic uintptr_t get_peb_from_teb(void) {\n"
+"    uintptr_t teb;\n"
+"    __asm__ volatile (\"movq %%gs:0x30, %0\" : \"=r\"(teb));\n"
+"    return *(uintptr_t *)(teb + 0x60);\n"
+"}");
+            break;
+        case FULL_PEB:
+            full_code_begin("CPU GS -> PEB");
+            cputs(
+"\nstatic uintptr_t get_current_peb(void) {\n"
+"    uintptr_t peb;\n"
+"    __asm__ volatile (\"movq %%gs:0x60, %0\" : \"=r\"(peb));\n"
+"    uintptr_t ldr = *(uintptr_t *)(peb + 0x18);\n"
+"    (void)ldr;\n"
+"    return peb;\n"
+"}");
+            break;
+        case FULL_LDR:
+            full_code_begin("PEB -> PEB_LDR_DATA -> InMemoryOrderModuleList");
+            cputs(
+"\nstatic void reach_loader_list(uintptr_t peb) {\n"
+"    uintptr_t ldr = *(uintptr_t *)(peb + 0x18);\n"
+"    uintptr_t head = ldr + 0x20;\n"
+"    uintptr_t first = *(uintptr_t *)(head + 0x00);\n"
+"    uintptr_t last = *(uintptr_t *)(head + 0x08);\n"
+"    (void)first; (void)last;\n"
+"}");
+            break;
+        case FULL_LDR_ENTRY:
+            full_code_begin("PEB -> matching LDR_DATA_TABLE_ENTRY");
+            full_code_request_comment(module_name,NULL);
+            full_module_lookup();
+            cputs(
+"\nstatic void inspect_module_entry(uintptr_t peb, const char *module) {\n"
+"    uintptr_t entry = find_module_entry(peb, module);\n"
+"    if (!entry) return;\n"
+"    uintptr_t links = entry + 0x10;\n"
+"    uintptr_t next = *(uintptr_t *)(entry + 0x10);\n"
+"    uintptr_t previous = *(uintptr_t *)(entry + 0x18);\n"
+"    uintptr_t dll_base = *(uintptr_t *)(entry + 0x30);\n"
+"    uint16_t name_bytes = *(uint16_t *)(entry + 0x48);\n"
+"    uint16_t name_capacity = *(uint16_t *)(entry + 0x4A);\n"
+"    uintptr_t name_buffer = *(uintptr_t *)(entry + 0x50);\n"
+"    (void)links; (void)next; (void)previous; (void)dll_base;\n"
+"    (void)name_bytes; (void)name_capacity; (void)name_buffer;\n"
+"}");
+            break;
+        case FULL_DOS:
+            full_code_begin("PEB -> module base -> IMAGE_DOS_HEADER data");
+            full_code_request_comment(module_name,NULL);
+            full_module_lookup();
+            cputs(
+"\nstatic uintptr_t reach_nt_headers(uintptr_t peb, const char *module) {\n"
+"    uintptr_t base = find_module_base(peb, module);\n"
+"    if (!base || *(uint16_t *)(base + 0x00) != 0x5A4D) return 0;\n"
+"    uint32_t e_lfanew = *(uint32_t *)(base + 0x3C);\n"
+"    return base + e_lfanew;\n"
+"}");
+            break;
+        case FULL_NT:
+            full_code_begin("PEB -> module base -> IMAGE_NT_HEADERS64 data");
+            full_code_request_comment(module_name,NULL);
+            full_module_lookup();
+            cputs(
+"\nstatic void inspect_nt_headers(uintptr_t peb, const char *module) {\n"
+"    uintptr_t base = find_module_base(peb, module);\n"
+"    if (!base || *(uint16_t *)(base + 0x00) != 0x5A4D) return;\n"
+"    uintptr_t nt = base + *(uint32_t *)(base + 0x3C);\n"
+"    uint32_t signature = *(uint32_t *)(nt + 0x00);\n"
+"    uint16_t machine = *(uint16_t *)(nt + 0x04);\n"
+"    uint16_t sections = *(uint16_t *)(nt + 0x06);\n"
+"    uint16_t optional_size = *(uint16_t *)(nt + 0x14);\n"
+"    uint16_t magic = *(uint16_t *)(nt + 0x18);\n"
+"    uint32_t entry_rva = *(uint32_t *)(nt + 0x28);\n"
+"    uintptr_t entry_va = base + entry_rva;\n"
+"    uint64_t preferred_base = *(uint64_t *)(nt + 0x30);\n"
+"    uint32_t image_size = *(uint32_t *)(nt + 0x50);\n"
+"    uint32_t directory_count = *(uint32_t *)(nt + 0x84);\n"
+"    (void)signature; (void)machine; (void)sections; (void)optional_size;\n"
+"    (void)magic; (void)entry_va; (void)preferred_base;\n"
+"    (void)image_size; (void)directory_count;\n"
+"}");
+            break;
+        case FULL_EXPORT_DATA:
+            full_code_begin("PEB -> module base -> export IMAGE_DATA_DIRECTORY");
+            full_code_request_comment(module_name,NULL);
+            full_module_lookup();
+            cputs(
+"\nstatic uintptr_t reach_export_directory(uintptr_t peb, const char *module) {\n"
+"    uintptr_t base = find_module_base(peb, module);\n"
+"    if (!base) return 0;\n"
+"    uintptr_t nt = base + *(uint32_t *)(base + 0x3C);\n"
+"    uint32_t export_rva = *(uint32_t *)(nt + 0x88);\n"
+"    uint32_t export_size = *(uint32_t *)(nt + 0x8C);\n"
+"    (void)export_size;\n"
+"    return export_rva ? base + export_rva : 0;\n"
+"}");
+            break;
+        case FULL_EXPORT_DIR:
+            full_code_begin("PEB -> module base -> IMAGE_EXPORT_DIRECTORY data");
+            full_code_request_comment(module_name,NULL);
+            full_module_lookup();
+            cputs(
+"\nstatic void inspect_export_directory(uintptr_t peb, const char *module) {\n"
+"    uintptr_t base = find_module_base(peb, module);\n"
+"    if (!base) return;\n"
+"    uintptr_t nt = base + *(uint32_t *)(base + 0x3C);\n"
+"    uintptr_t exp = base + *(uint32_t *)(nt + 0x88);\n"
+"    uint32_t flags = *(uint32_t *)(exp + 0x00);\n"
+"    uint32_t stamp = *(uint32_t *)(exp + 0x04);\n"
+"    uint16_t major = *(uint16_t *)(exp + 0x08);\n"
+"    uint16_t minor = *(uint16_t *)(exp + 0x0A);\n"
+"    char *dll_name = (char *)(base + *(uint32_t *)(exp + 0x0C));\n"
+"    uint32_t ordinal_base = *(uint32_t *)(exp + 0x10);\n"
+"    uint32_t function_count = *(uint32_t *)(exp + 0x14);\n"
+"    uint32_t name_count = *(uint32_t *)(exp + 0x18);\n"
+"    uint32_t *functions = (uint32_t *)(base + *(uint32_t *)(exp + 0x1C));\n"
+"    uint32_t *names = (uint32_t *)(base + *(uint32_t *)(exp + 0x20));\n"
+"    uint16_t *ordinals = (uint16_t *)(base + *(uint32_t *)(exp + 0x24));\n"
+"    (void)flags; (void)stamp; (void)major; (void)minor; (void)dll_name;\n"
+"    (void)ordinal_base; (void)function_count; (void)name_count;\n"
+"    (void)functions; (void)names; (void)ordinals;\n"
+"}");
+            break;
+        case FULL_EXPORT_LOOKUP:
+            full_code_begin("PEB -> module base -> named export address");
+            full_code_request_comment(module_name,function_name);
+            full_module_lookup();
+            cputs(
+"\nstatic uintptr_t find_export_from_peb(uintptr_t peb, const char *module,\n"
+"                                      const char *wanted) {\n"
+"    uintptr_t base = find_module_base(peb, module);\n"
+"    if (!base || *(uint16_t *)(base + 0x00) != 0x5A4D) return 0;\n"
+"    uintptr_t nt = base + *(uint32_t *)(base + 0x3C);\n"
+"    if (*(uint32_t *)(nt + 0x00) != 0x00004550) return 0;\n"
+"    uint32_t export_rva = *(uint32_t *)(nt + 0x88);\n"
+"    if (!export_rva) return 0;\n"
+"    uintptr_t exp = base + export_rva;\n"
+"    uint32_t function_count = *(uint32_t *)(exp + 0x14);\n"
+"    uint32_t name_count = *(uint32_t *)(exp + 0x18);\n"
+"    uintptr_t functions = base + *(uint32_t *)(exp + 0x1C);\n"
+"    uintptr_t names = base + *(uint32_t *)(exp + 0x20);\n"
+"    uintptr_t ordinals = base + *(uint32_t *)(exp + 0x24);\n"
+"    for (uint32_t i = 0; i < name_count; ++i) {\n"
+"        uint32_t name_rva = *(uint32_t *)(names + i * 4);\n"
+"        char *name = (char *)(base + name_rva);\n"
+"        if (strcmp(name, wanted) != 0) continue;\n"
+"        uint16_t index = *(uint16_t *)(ordinals + i * 2);\n"
+"        if (index >= function_count) return 0;\n"
+"        uint32_t function_rva = *(uint32_t *)(functions + index * 4);\n"
+"        return base + function_rva;\n"
+"    }\n"
+"    return 0;\n"
+"}");
+            break;
+    }
+    puts("  --------------------------------------------------------------------------");
+}
+
 static uintptr_t resolver(const char *module_name) {
     uintptr_t teb=(uintptr_t)teb_address(), peb=0, ldr=0;
     header("TEB",teb);
@@ -350,6 +651,7 @@ static uintptr_t resolver(const char *module_name) {
     pointer_field(teb,TEB_PEB,"ProcessEnvironmentBlock",peb,
         "Pointer to the process environment block (PEB).",
         "uintptr_t peb = *(uintptr_t *)(teb + 0x60);");
+    print_full_code(FULL_TEB,module_name,NULL);
 
     header("PEB",peb);
     pointer_field(peb,0,"[STRUCT BASE]",peb,
@@ -359,6 +661,7 @@ static uintptr_t resolver(const char *module_name) {
     pointer_field(peb,PEB_LDR,"Ldr",ldr,
         "Points to loader data and module lists.",
         "uintptr_t ldr = *(uintptr_t *)(peb + 0x18);");
+    print_full_code(FULL_PEB,module_name,NULL);
 
     uintptr_t head=ldr+LDR_MEMORY_LIST, curr=0, last=0;
     header("PEB_LDR_DATA",ldr);
@@ -375,6 +678,7 @@ static uintptr_t resolver(const char *module_name) {
     pointer_field(head,8,"InMemoryOrderList.Blink",last,
         "Last LIST_ENTRY link in the circular list.",
         "uintptr_t last = *(uintptr_t *)(ldr + 0x28);");
+    print_full_code(FULL_LDR,module_name,NULL);
 
     for (unsigned idx=1;curr!=head && idx<=MAX_MODULES;idx++) {
         if (!curr || curr<ENTRY_LINKS) return 0;
@@ -412,7 +716,9 @@ static uintptr_t resolver(const char *module_name) {
             "Pointer to a UTF-16LE full DLL path; may not be NUL-terminated.",
             "uintptr_t nameBuffer = *(uintptr_t *)(entry + 0x50);");
         print_name(namebuf,len);
-        if (is_module_name(namebuf,len,module_name)) {
+        int module_matches=is_module_name(namebuf,len,module_name);
+        if (module_matches) {
+            print_full_code(FULL_LDR_ENTRY,module_name,NULL);
             printf("\n[+] %s FOUND: ",module_name);
             yellow(); printf("0x%016" PRIXPTR "\n",dll); normal();
             return dll;
@@ -440,7 +746,8 @@ static int read_image_string(uintptr_t base, uint32_t rva, uint32_t image_size,
     return 0;
 }
 
-static uintptr_t explain_export(uintptr_t base, const char *function_name) {
+static uintptr_t explain_export(uintptr_t base, const char *module_name,
+                                const char *function_name) {
     IMAGE_DOS_HEADER dos;
     if (read_at(base,&dos,sizeof dos)!=sizeof dos || dos.e_magic!=IMAGE_DOS_SIGNATURE) {
         puts("[!] The module does not contain a readable MZ/DOS header.");
@@ -479,6 +786,7 @@ static uintptr_t explain_export(uintptr_t base, const char *function_name) {
     pointer_field(base,offsetof(IMAGE_DOS_HEADER,e_lfanew),"e_lfanew -> NT headers",nt_address,
         "Computed address (base + e_lfanew); this is explanatory, not a pointer field stored in the header.",
         "uintptr_t ntAddress = base + *(uint32_t *)(base + 0x3C);");
+    print_full_code(FULL_DOS,module_name,NULL);
 
     header("IMAGE_NT_HEADERS64",nt_address);
     hex_number_field(nt_address,offsetof(IMAGE_NT_HEADERS64,Signature),"Signature (PE\\0\\0)",nt.Signature,
@@ -502,6 +810,7 @@ static uintptr_t explain_export(uintptr_t base, const char *function_name) {
         "Total mapped image size, used to bound every RVA dereference.","uint32_t imageSize = *(uint32_t *)(ntAddress + 0x50);");
     number_field(nt_address,offsetof(IMAGE_NT_HEADERS64,OptionalHeader.NumberOfRvaAndSizes),"NumberOfRvaAndSizes",nt.OptionalHeader.NumberOfRvaAndSizes,
         "Number of valid IMAGE_DATA_DIRECTORY elements.","uint32_t count = *(uint32_t *)(ntAddress + 0x84);");
+    print_full_code(FULL_NT,module_name,NULL);
 
     IMAGE_DATA_DIRECTORY data=nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
     uintptr_t data_address=nt_address+offsetof(IMAGE_NT_HEADERS64,OptionalHeader.DataDirectory)+
@@ -514,6 +823,7 @@ static uintptr_t explain_export(uintptr_t base, const char *function_name) {
         "uintptr_t exportDir = base + *(uint32_t *)(ntAddress + 0x88);");
     number_field(data_address,offsetof(IMAGE_DATA_DIRECTORY,Size),"Size",data.Size,
         "Byte span of the export directory; function RVAs inside this span are forwarder strings.","uint32_t exportBytes = *(uint32_t *)(ntAddress + 0x8C);");
+    print_full_code(FULL_EXPORT_DATA,module_name,NULL);
     if (!data.VirtualAddress || data.Size<sizeof(IMAGE_EXPORT_DIRECTORY) ||
         !image_range(data.VirtualAddress,data.Size,image_size)) {
         puts("[!] This module has no valid export directory.");
@@ -559,6 +869,7 @@ static uintptr_t explain_export(uintptr_t base, const char *function_name) {
     char exported_dll_name[1024];
     if (read_image_string(base,exp.Name,image_size,exported_dll_name,sizeof exported_dll_name))
         printf("           |      DLL  -> %s\n",exported_dll_name);
+    print_full_code(FULL_EXPORT_DIR,module_name,NULL);
 
     if (!exp.NumberOfNames || exp.NumberOfNames>MAX_EXPORTS ||
         !exp.NumberOfFunctions || exp.NumberOfFunctions>MAX_EXPORTS ||
@@ -600,6 +911,7 @@ static uintptr_t explain_export(uintptr_t base, const char *function_name) {
             "Raw DWORD RVA stored in the selected Export Address Table element.","uint32_t functionRva = *(uint32_t *)((uintptr_t)functions + ordinalIndex * 4);");
         pointer_field(function_slot,0,"AddressOfFunctions[index] -> VA",base+function_rva,
             "Function RVA converted to VA. If it falls inside the export directory, it names a forwarder instead of code.","uintptr_t address = base + *(uint32_t *)((uintptr_t)functions + ordinalIndex * 4);");
+        print_full_code(FULL_EXPORT_LOOKUP,module_name,function_name);
 
         uint64_t export_end=(uint64_t)data.VirtualAddress+data.Size;
         if (function_rva>=data.VirtualAddress && (uint64_t)function_rva<export_end) {
@@ -629,12 +941,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--asm")) opt_asm=1;
         else if (!strcmp(argv[i],"--desc")) opt_desc=1;
         else if (!strcmp(argv[i],"--code")) opt_code=1;
+        else if (!strcmp(argv[i],"--code-full")) opt_code_full=1;
         else if (!strcmp(argv[i],"--func")) {
             if (++i>=argc) { fputs("--func requires DLL:Function\n",stderr); return 2; }
             func_spec=argv[i];
         }
         else if (!strcmp(argv[i],"--help") || !strcmp(argv[i],"-h")) { usage(argv[0]); return 0; }
         else { fprintf(stderr,"Unknown option: %s\n",argv[i]); usage(argv[0]); return 2; }
+    }
+    if (opt_code && opt_code_full) {
+        fputs("--code and --code-full are mutually exclusive.\n",stderr);
+        return 2;
     }
     char module_name[MAX_PATH]="kernel32.dll";
     char function_name[1024]="";
@@ -649,10 +966,11 @@ int main(int argc, char **argv) {
         memcpy(module_name,func_spec,module_len); module_name[module_len]=0;
         strcpy(function_name,colon+1);
     }
-    printf("Windows x64 memory inspector | HEX=%s TEXT=%s ASM=%s DESC=%s CODE=%s\n",
-           opt_hex?"ON":"OFF",opt_text?"ON":"OFF",opt_asm?"ON":"OFF",opt_desc?"ON":"OFF",opt_code?"ON":"OFF");
+    printf("Windows x64 memory inspector | HEX=%s TEXT=%s ASM=%s DESC=%s CODE=%s CODE_FULL=%s\n",
+           opt_hex?"ON":"OFF",opt_text?"ON":"OFF",opt_asm?"ON":"OFF",opt_desc?"ON":"OFF",
+           opt_code?"ON":"OFF",opt_code_full?"ON":"OFF");
     uintptr_t module=resolver(module_name);
-    uintptr_t found=func_spec && module ? explain_export(module,function_name) : module;
+    uintptr_t found=func_spec && module ? explain_export(module,module_name,function_name) : module;
     if (opt_asm) {
         puts("\nASM sample: bytes at resolver() (executable code, independent of loader pointers)");
         dump_asm((uintptr_t)(void *)&resolver);

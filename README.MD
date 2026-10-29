@@ -22,6 +22,24 @@ The initial Windows x64 implementation can:
 
 The optional table columns are disabled unless their corresponding flag is supplied. They are designed to keep related information grouped, even when a cell spans multiple lines.
 
+## Screenshots
+
+![TEB, PEB, and loader structures with field descriptions](imgs/bs_1.png)
+
+*`--desc` adds concise explanations next to the TEB, PEB, loader data, and module-entry fields.*
+
+![Beginning of a full C walkthrough from the TEB to the loader](imgs/bs_2.png)
+
+*`--code-full` prints complete C paths below each section, starting with the TEB, PEB, and loader list.*
+
+![Hardcoded-offset C traversal from the PEB to the PE headers](imgs/bs_3.png)
+
+*The expanded walkthrough reaches the selected module and its PE headers using pointer arithmetic and hardcoded offsets only.*
+
+![Hexadecimal memory preview for pointer destinations](imgs/bs_4.png)
+
+*`--hex` adds a 32-byte hexadecimal preview for every readable pointer destination.*
+
 ## Build
 
 **Requirements:** Windows x64 and a MinGW-w64 x86-64 GCC toolchain.
@@ -33,7 +51,7 @@ x86_64-w64-mingw32-gcc.exe winstruct.c -O2 -s -static -o winstruct.exe
 ## Usage
 
 ```bash
-winstruct.exe [--func DLL:Function] [--hex] [--text] [--asm] [--desc] [--code] [--help]
+winstruct.exe [--func DLL:Function] [--hex] [--text] [--asm] [--desc] [--code|--code-full] [--help]
 ```
 
 | Option | Purpose |
@@ -43,7 +61,8 @@ winstruct.exe [--func DLL:Function] [--hex] [--text] [--asm] [--desc] [--code] [
 | `--text` | Add a column containing up to 30 bytes from each pointer destination as ASCII, replacing every byte outside `0x20`–`0x7E` with `.`. |
 | `--asm` | Attempt to decode up to 10 instructions from up to 64 bytes of executable memory. |
 | `--desc` | Add concise explanations of fields to the table. |
-| `--code` | Add C snippets using only explicit Windows x64 offsets, fixed array strides, and pointer arithmetic; the displayed code does not depend on SDK structure definitions. |
+| `--code` | Add syntax-highlighted C snippets using only explicit Windows x64 offsets, fixed array strides, and pointer arithmetic; the displayed code does not depend on SDK structure definitions. |
+| `--code-full` | Print a complete, syntax-highlighted PEB-to-data C walkthrough below every relevant structure. This is mutually exclusive with `--code`. |
 | `--help` | Show the available options. |
 
 Options can be combined:
@@ -55,11 +74,12 @@ winstruct.exe --text --desc
 winstruct.exe --hex --asm --desc --code
 winstruct.exe --func KERNEL32.dll:LoadLibraryA
 winstruct.exe --func ntdll.dll:NtCreateFile --code
+winstruct.exe --func KERNEL32.dll:LoadLibraryA --code-full
 ```
 
 Running without options displays a more compact view.
 
-`--desc`, `--code`, `--hex`, and `--text` are independent, opt-in columns. In particular, `--func` does not enable `--desc` automatically:
+`--desc`, `--code`, `--hex`, and `--text` are independent, opt-in columns. `--code-full` is an opt-in block shown below the tables rather than a column. In particular, `--func` does not enable `--desc` automatically:
 
 ```bash
 # PE tables without descriptions
@@ -97,7 +117,10 @@ All RVAs and array spans are checked against `SizeOfImage` before they are deref
 - `--text` reads at most 30 bytes at pointer destinations. Printable ASCII is preserved and all other byte values appear as `.`.
 - `--desc` adds the field-description column only when explicitly requested.
 - `--code` adds reproducible C expressions based on fixed Windows x64 offsets. These snippets use integer types, pointer arithmetic, hardcoded field offsets, and explicit array strides such as `i * 4` or `i * 2`; they do not use Windows SDK structure definitions.
+- `--code-full` prints complete C paths below the relevant TEB, PEB, loader, module, DOS, NT, data-directory, export-directory, and final export-lookup sections. Each block starts at the current PEB (or shows how the PEB itself is obtained), repeats every required hardcoded transition, and does not use Windows SDK structure definitions. Because it is intended as the expanded alternative to the compact `--code` column, combining the two flags is rejected.
 - `--asm` only attempts decoding when the destination belongs to an executable memory page.
+
+Both C modes use native Windows console colors for syntax highlighting: keywords and integer types are cyan, numeric constants and offsets are magenta, strings and character literals are bright green, and comments are green. No ANSI escape sequences are written, so redirected output remains plain text.
 
 ## Project direction
 
